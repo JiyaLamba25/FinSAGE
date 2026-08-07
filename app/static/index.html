@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FinSAGE</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="sidebar-header">
+          <h1 class="brand">FinSAGE</h1>
+          <button id="new-chat-btn" class="primary-btn" type="button">+ New Chat</button>
+        </div>
+
+        <div class="sidebar-section">
+          <div class="section-title">Recent Conversations</div>
+          <ul id="conversation-list" class="conversation-list"></ul>
+          <button id="clear-history-btn" class="text-btn" type="button">Clear all</button>
+        </div>
+
+        <nav class="sidebar-nav" aria-label="Main navigation">
+          <button class="nav-btn active" data-view="chat" type="button">Chat</button>
+          <button class="nav-btn" data-view="search" type="button">Search</button>
+          <button class="nav-btn" data-view="records" type="button">Recent Records</button>
+          <button class="nav-btn" data-view="admin" type="button">Admin</button>
+          <button class="nav-btn" data-view="settings" type="button">Settings</button>
+        </nav>
+      </aside>
+
+      <main class="main-panel">
+        <div id="chat-view" class="view active">
+          <div id="chat-content" class="chat-content">
+            <div id="landing-state" class="landing-state">
+              <h2>What would you like to know about your data?</h2>
+              <p>Ask anything about sales, regions, products, profitability, and more.</p>
+              <div class="example-chips">
+                <button class="chip" data-question="Show top 5 products by sales" type="button">Show top 5 products by sales</button>
+                <button class="chip" data-question="Compare profit by region" type="button">Compare profit by region</button>
+                <button class="chip" data-question="Which category had the highest discount?" type="button">Which category had the highest discount?</button>
+              </div>
+            </div>
+            <div id="chat-thread" class="chat-thread hidden"></div>
+          </div>
+
+          <form id="chat-form" class="composer">
+            <input id="chat-input" type="text" placeholder="Ask about your dataset..." autocomplete="off" />
+            <button class="send-btn" type="submit">Send</button>
+          </form>
+        </div>
+
+        <div id="search-view" class="view hidden">
+          <div class="view-card">
+            <h2>Search Records</h2>
+            <form id="search-form" class="inline-form">
+              <input id="order-id-input" type="text" placeholder="Order ID" />
+              <button type="submit">Search</button>
+            </form>
+            <div id="search-results" class="results-panel"></div>
+          </div>
+        </div>
+
+        <div id="records-view" class="view hidden">
+          <div class="view-card">
+            <div class="view-card-head">
+              <h2>Recent Records</h2>
+              <div class="inline-form compact-inline">
+                <label class="field-label" for="recent-records-limit">Show</label>
+                <select id="recent-records-limit">
+                  <option value="5">5</option>
+                  <option value="10">10</option>
+                  <option value="20">20</option>
+                  <option value="30">30</option>
+                </select>
+                <button id="refresh-records-btn" class="secondary-btn" type="button">Refresh</button>
+              </div>
+            </div>
+            <div id="recent-records" class="results-panel"></div>
+          </div>
+        </div>
+
+        <div id="admin-view" class="view hidden">
+          <div class="view-card">
+            <h2>Admin</h2>
+            <div id="admin-auth" class="admin-section"></div>
+            <div id="admin-content" class="hidden"></div>
+          </div>
+        </div>
+
+        <div id="settings-view" class="view hidden">
+          <div class="view-card">
+            <div class="view-card-head">
+              <h2>Settings</h2>
+              <button id="settings-logout-btn" class="secondary-btn hidden" type="button">Logout</button>
+            </div>
+
+            <div class="settings-stack">
+              <section class="settings-section">
+                <div class="setting-row">
+                  <div>
+                    <h3>Theme</h3>
+                    <p>Choose how FinSAGE feels in your workspace.</p>
+                  </div>
+                  <select id="theme-pref">
+                    <option value="light">Light</option>
+                    <option value="dark">Dark</option>
+                  </select>
+                </div>
+              </section>
+
+              <section class="settings-section">
+                <div class="setting-row compact">
+                  <div>
+                    <h3>Conversation history</h3>
+                    <p>Remove stored chat threads from this browser.</p>
+                  </div>
+                  <button id="clear-settings-btn" class="secondary-btn" type="button">Clear conversation history</button>
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+
+        <div id="status-banner" class="status-banner hidden"></div>
+      </main>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
