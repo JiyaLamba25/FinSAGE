@@ -8,7 +8,14 @@ from app.services.ambiguity_detector import is_ambiguous, get_clarification_mess
 from app.services.conversation_memory import save_context, get_context, MAX_CLARIFICATION_ROUNDS
 from app.services.anomaly_detector import detect_anomalies
 from app.services.whatif_parser import parse_whatif_question
-from app.services.whatif_simulator import run_whatif_simulation
+from app.services.whatif_simulator import (
+    get_baseline,
+    simulate_discount_scenario,
+    simulate_price_scenario_with_range,
+    run_sensitivity_sweep,
+    run_combined_scenario,
+    compute_breakeven_discount,
+)
 from app.viz.chart_generator import generate_chart, detect_chart_type, wants_visualization
 
 router = APIRouter()
@@ -73,24 +80,104 @@ def build_contextual_question(req: QuestionRequest):
 def chat_query(req: QuestionRequest):
 
     # --- What-If Counterfactual Simulation (deterministic, bypasses LLM entirely) ---
-    whatif_scenario = parse_whatif_question(req.question)
-    if whatif_scenario:
-        if not whatif_scenario["direction"] or not whatif_scenario["percent"]:
+    whatif_result = parse_whatif_question(req.question)
+    if whatif_result:
+
+        if whatif_result["is_breakeven"]:
+            try:
+                be = compute_breakeven_discount()
+            except ValueError as e:
+                return {
+                    "question": req.question, "generated_sql": None, "results": None,
+                    "answer": str(e), "options": [], "chart": None,
+                    "needs_clarification": False, "anomalies": []
+                }
+            answer = (
+                f"**Break-even discount point** (simulated):\n\n"
+                f"- Current average discount: {be['baseline_discount_pct']:.2f}%\n"
+                f"- Break-even average discount: {be['breakeven_discount_pct']:.2f}% "
+                f"(about {be['additional_discount_points_pct']:.2f} more percentage points)\n"
+                f"- Current total profit: ${be['baseline_profit']:,.2f}\n\n"
+                f"*Assumption: {be['assumption']}*"
+            )
             return {
-                "question": req.question,
-                "generated_sql": None,
-                "results": None,
-                "answer": "For a what-if scenario, please specify a percentage and a direction — "
-                          "e.g. \"What if we reduce discounts by 10%?\" or \"What if we increase price by 15%?\"",
-                "options": [],
-                "chart": None,
-                "needs_clarification": False,
-                "anomalies": []
+                "question": req.question, "generated_sql": None, "results": None,
+                "answer": answer, "options": [], "chart": None,
+                "needs_clarification": False, "anomalies": []
             }
 
-        sim = run_whatif_simulation(whatif_scenario["type"], whatif_scenario["direction"], whatif_scenario["percent"])
+        scenarios = whatif_result["scenarios"]
+        discount_sc = next((s for s in scenarios if s["type"] == "discount"), None)
+        price_sc = next((s for s in scenarios if s["type"] == "price"), None)
 
-        if whatif_scenario["type"] == "discount":
+        if discount_sc and price_sc:
+            if not discount_sc["direction"] or not price_sc["direction"]:
+                return {
+                    "question": req.question, "generated_sql": None, "results": None,
+                    "answer": "For a combined scenario, please specify a direction (increase/decrease) "
+                              "for both the discount and the price change.",
+                    "options": [], "chart": None, "needs_clarification": False, "anomalies": []
+                }
+            if not discount_sc["percent"] or not price_sc["percent"]:
+                return {
+                    "question": req.question, "generated_sql": None, "results": None,
+                    "answer": "For a combined scenario, please specify a percentage for both changes — "
+                              "e.g. \"What if we reduce discounts by 10% and increase price by 5%?\"",
+                    "options": [], "chart": None, "needs_clarification": False, "anomalies": []
+                }
+            sim = run_combined_scenario(discount_sc["direction"], discount_sc["percent"],
+                                         price_sc["direction"], price_sc["percent"])
+            answer = (
+                f"**{sim['scenario'].capitalize()}** (simulated):\n\n"
+                f"- Total sales: ${sim['baseline_sales']:,.2f} → ${sim['simulated_sales']:,.2f}\n"
+                f"- Total profit: ${sim['baseline_profit']:,.2f} → ${sim['simulated_profit']:,.2f} "
+                f"({'+' if sim['profit_change'] >= 0 else ''}{sim['profit_change']:,.2f})\n\n"
+                f"*Assumption: {sim['assumption']}*"
+            )
+            anomalies = detect_anomalies([{"scenario": "Simulated (combined)", "profit": sim["simulated_profit"]}])
+            return {
+                "question": req.question, "generated_sql": None, "results": None,
+                "answer": answer, "options": [], "chart": None,
+                "needs_clarification": False, "anomalies": anomalies
+            }
+
+        sc = scenarios[0]
+        if not sc["direction"]:
+            return {
+                "question": req.question, "generated_sql": None, "results": None,
+                "answer": "For a what-if scenario, please specify a direction — "
+                          "e.g. \"What if we reduce discounts by 10%?\" or \"What if we increase price by 15%?\"",
+                "options": [], "chart": None, "needs_clarification": False, "anomalies": []
+            }
+
+        if sc["percent"] is None:
+            sweep = run_sensitivity_sweep(sc["type"], sc["direction"])
+            label = "Discount" if sc["type"] == "discount" else "Price"
+            table_rows = "\n".join(
+                f"| {row['percent']:.0f}% | ${row['simulated_profit']:,.2f} | "
+                f"{'+' if row['profit_change'] >= 0 else ''}{row['profit_change']:,.2f} |"
+                for row in sweep
+            )
+            answer = (
+                f"No specific percentage given, so here's a sensitivity sweep for "
+                f"**{sc['direction']} {label.lower()}** across a default range:\n\n"
+                f"| {label} Change | Simulated Profit | Profit Change |\n"
+                f"|---|---|---|\n"
+                f"{table_rows}\n\n"
+                f"*Ask with a specific percentage (e.g. \"by 10%\") for a single detailed scenario instead.*"
+            )
+            worst_row = min(sweep, key=lambda r: r["simulated_profit"])
+            anomalies = detect_anomalies([{"scenario": f"Sensitivity worst-case ({worst_row['percent']:.0f}%)",
+                                            "profit": worst_row["simulated_profit"]}])
+            return {
+                "question": req.question, "generated_sql": None, "results": None,
+                "answer": answer, "options": [], "chart": None,
+                "needs_clarification": False, "anomalies": anomalies
+            }
+
+        baseline = get_baseline()
+        if sc["type"] == "discount":
+            sim = simulate_discount_scenario(baseline, sc["direction"], sc["percent"])
             answer = (
                 f"**{sim['scenario'].capitalize()}** (simulated):\n\n"
                 f"- Average discount: {sim['baseline_discount_pct']:.2f}% → {sim['simulated_discount_pct']:.2f}%\n"
@@ -100,25 +187,22 @@ def chat_query(req: QuestionRequest):
                 f"*Assumption: {sim['assumption']}*"
             )
         else:
+            sim = simulate_price_scenario_with_range(baseline, sc["direction"], sc["percent"])
             answer = (
                 f"**{sim['scenario'].capitalize()}** (simulated):\n\n"
                 f"- Total sales: ${sim['baseline_sales']:,.2f} → ${sim['simulated_sales']:,.2f}\n"
                 f"- Total profit: ${sim['baseline_profit']:,.2f} → ${sim['simulated_profit']:,.2f} "
-                f"({'+' if sim['profit_change'] >= 0 else ''}{sim['profit_change']:,.2f})\n\n"
+                f"({'+' if sim['profit_change'] >= 0 else ''}{sim['profit_change']:,.2f})\n"
+                f"- Range (depending on actual demand sensitivity): "
+                f"${sim['profit_range_low']:,.2f} to ${sim['profit_range_high']:,.2f}\n\n"
                 f"*Assumption: {sim['assumption']}*"
             )
 
-        whatif_anomalies = detect_anomalies([{"scenario": "Simulated", "profit": sim["simulated_profit"]}])
-
+        anomalies = detect_anomalies([{"scenario": "Simulated", "profit": sim["simulated_profit"]}])
         return {
-            "question": req.question,
-            "generated_sql": None,
-            "results": None,
-            "answer": answer,
-            "options": [],
-            "chart": None,
-            "needs_clarification": False,
-            "anomalies": whatif_anomalies
+            "question": req.question, "generated_sql": None, "results": None,
+            "answer": answer, "options": [], "chart": None,
+            "needs_clarification": False, "anomalies": anomalies
         }
     # --- end What-If block ---
 
