@@ -3,10 +3,10 @@ from pydantic import BaseModel
 from app.llm.nl_to_sql import generate_sql
 from app.db.query_executor import execute_sql
 from app.llm.response_gen import generate_answer
-from app.services.query_validator import validate_sql
 from app.services.ambiguity_detector import is_ambiguous, get_clarification_message
 from app.services.conversation_memory import save_context, get_context, MAX_CLARIFICATION_ROUNDS
 from app.services.anomaly_detector import detect_anomalies
+from app.services.self_correction import execute_with_self_correction
 from app.services.whatif_parser import parse_whatif_question
 from app.services.whatif_simulator import (
     get_baseline,
@@ -280,14 +280,35 @@ def chat_query(req: QuestionRequest):
     if sql == "INVALID_QUERY":
         raise HTTPException(status_code=400, detail="Could not generate a valid query for this question")
 
-    is_valid, error_msg = validate_sql(sql)
-    if not is_valid:
-        raise HTTPException(status_code=400, detail=f"Query rejected: {error_msg}")
+    correction_result = execute_with_self_correction(effective_question, sql)
 
-    try:
-        results = execute_sql(sql)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Query execution failed: {str(e)}")
+    if correction_result["status"] == "rate_limited":
+        return {
+            "question": req.question,
+            "generated_sql": None,
+            "results": None,
+            "answer": "The system is receiving too many requests right now. Please wait a few seconds and try again.",
+            "options": [],
+            "chart": None,
+            "needs_clarification": False,
+            "anomalies": []
+        }
+
+    if correction_result["status"] == "failed":
+        return {
+            "question": req.question,
+            "generated_sql": None,
+            "results": None,
+            "answer": "I generated a query for this but couldn't get it to run successfully after a couple of "
+                      "attempts — could you try rephrasing the question?",
+            "options": [],
+            "chart": None,
+            "needs_clarification": False,
+            "anomalies": []
+        }
+
+    sql = correction_result["sql"]
+    results = correction_result["results"]
 
     answer = generate_answer(effective_question, results)
     if answer == "RATE_LIMITED":
