@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
+from app.core.security import verify_token
 from pydantic import BaseModel
 from app.llm.nl_to_sql import generate_sql
 from app.db.query_executor import execute_sql
@@ -7,6 +8,7 @@ from app.services.ambiguity_detector import is_ambiguous, get_clarification_mess
 from app.services.conversation_memory import save_context, get_context, MAX_CLARIFICATION_ROUNDS
 from app.services.anomaly_detector import detect_anomalies
 from app.services.self_correction import execute_with_self_correction
+from app.services.query_cache import get_cached, set_cached, get_cache_stats
 from app.services.whatif_parser import parse_whatif_question
 from app.services.whatif_simulator import (
     get_baseline,
@@ -42,16 +44,26 @@ def parse_clarification(sql: str) -> dict:
 
 OVERRIDE_SIGNALS = ["instead", "actually", "never mind", "different question"]
 
+COMPREHENSIVE_REQUEST_KEYWORDS = [
+    "everything", "all information", "all metrics", "all details",
+    "full picture", "overview", "summary of everything",
+]
+
 
 def is_likely_clarification_answer(question: str) -> bool:
     word_count = len(question.strip().split())
     return word_count <= 6
 
 
+def is_comprehensive_request(text: str) -> bool:
+    q = text.lower()
+    return any(keyword in q for keyword in COMPREHENSIVE_REQUEST_KEYWORDS)
+
+
 def build_contextual_question(req: QuestionRequest):
     context = get_context(req.session_id)
     if not context:
-        return req.question, None, [], 0
+        return req.question, None, [], 0, False
 
     is_override = any(sig in req.question.lower() for sig in OVERRIDE_SIGNALS)
     pending_original = context.get("pending_original_question")
@@ -60,7 +72,8 @@ def build_contextual_question(req: QuestionRequest):
     if pending_original and not is_override and is_likely_clarification_answer(req.question):
         answers = context.get("clarification_answers", []) + [req.question]
         combined = pending_original + " " + " ".join(f"({a})" for a in answers)
-        return combined, pending_original, answers, rounds
+        comprehensive_override = is_comprehensive_request(req.question)
+        return combined, pending_original, answers, rounds, comprehensive_override
 
     reference_question = context.get("last_question")
     follow_up_indicators = ["that", "this", "it", "compare to", " vs ", "previous", "last time", "instead"]
@@ -71,9 +84,9 @@ def build_contextual_question(req: QuestionRequest):
             f"unless the new question explicitly specifies a different one. "
             f"New follow-up question: {req.question}"
         )
-        return combined, None, [], 0
+        return combined, None, [], 0, False
 
-    return req.question, None, [], 0
+    return req.question, None, [], 0, False
 
 
 @router.post("/chat/query")
@@ -206,8 +219,22 @@ def chat_query(req: QuestionRequest):
         }
     # --- end What-If block ---
 
-    effective_question, pending_original, clarification_answers, rounds = build_contextual_question(req)
-    force_final = rounds >= MAX_CLARIFICATION_ROUNDS
+    effective_question, pending_original, clarification_answers, rounds, comprehensive_override = build_contextual_question(req)
+    force_final = rounds >= MAX_CLARIFICATION_ROUNDS or comprehensive_override
+
+    # A "fresh" question: no pending clarification, and no follow-up context
+    # was merged in. Only these get cached/looked-up — a clarification answer
+    # or a follow-up depends on conversation state, not just its own text.
+    is_fresh = pending_original is None and effective_question == req.question
+
+    if is_fresh:
+        cached_response = get_cached(req.question)
+        if cached_response:
+            save_context(req.session_id, effective_question,
+                         sql=cached_response.get("generated_sql"),
+                         results=cached_response.get("results"),
+                         pending_original_question=None, clarification_answers=[], clarification_rounds=0)
+            return cached_response
 
     if not pending_original and is_ambiguous(effective_question) and not force_final:
         clarification = get_clarification_message(effective_question)
@@ -226,7 +253,7 @@ def chat_query(req: QuestionRequest):
             "anomalies": []
         }
 
-    sql = generate_sql(effective_question, force_final_answer=force_final)
+    sql = generate_sql(effective_question, force_final_answer=force_final, comprehensive=comprehensive_override)
 
     if sql == "RATE_LIMITED":
         return {
@@ -244,7 +271,7 @@ def chat_query(req: QuestionRequest):
         parsed_fallback = parse_clarification(sql)
         assumed_default = parsed_fallback["options"][0] if parsed_fallback["options"] else "the most common default"
         retry_question = f"{effective_question}. Final assumption to use for any missing detail: {assumed_default}."
-        sql = generate_sql(retry_question, force_final_answer=True)
+        sql = generate_sql(retry_question, force_final_answer=True, comprehensive=comprehensive_override)
 
     if force_final and sql.strip().startswith("CLARIFY:"):
         save_context(req.session_id, effective_question,
@@ -333,7 +360,7 @@ def chat_query(req: QuestionRequest):
     save_context(req.session_id, effective_question, sql=sql, results=results,
                  pending_original_question=None, clarification_answers=[], clarification_rounds=0)
 
-    return {
+    response_payload = {
         "question": req.question,
         "generated_sql": sql,
         "results": results,
@@ -343,6 +370,11 @@ def chat_query(req: QuestionRequest):
         "needs_clarification": False,
         "anomalies": anomalies
     }
+
+    if is_fresh:
+        set_cached(req.question, response_payload)
+
+    return response_payload
 
 
 @router.post("/chat/explain")
@@ -359,3 +391,8 @@ def explain_last_query(req: ExplainRequest):
         "sql": sql,
         "row_count": len(results)
     }
+
+
+@router.get("/admin/cache-stats", dependencies=[Depends(verify_token)])
+def cache_stats():
+    return get_cache_stats()

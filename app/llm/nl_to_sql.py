@@ -7,7 +7,12 @@ from google.api_core.exceptions import TooManyRequests
 genai.configure(api_key=GEMINI_API_KEY, transport="rest")
 model = genai.GenerativeModel("gemini-3.5-flash-lite")
 
-def generate_sql(question: str, force_final_answer: bool = False) -> str:
+COMPREHENSIVE_DEFAULT_METRICS = (
+    "total sales, total profit, profit margin, average discount rate, and average order value"
+)
+
+
+def generate_sql(question: str, force_final_answer: bool = False, comprehensive: bool = False) -> str:
     schema = get_schema_description()
     metric_block = build_metric_prompt_block()
 
@@ -19,6 +24,15 @@ def generate_sql(question: str, force_final_answer: bool = False) -> str:
             "valid SQL SELECT query. If any detail is still unclear, silently pick the single most sensible "
             "default (e.g. all available years, monthly granularity, SUM aggregation, top 5 as default limit) "
             "and generate the query directly — do not explain the assumption, output ONLY the SQL."
+        )
+
+    comprehensive_instruction = ""
+    if comprehensive:
+        comprehensive_instruction = (
+            f"\nThe user has asked for a general/comprehensive overview (e.g. \"everything\", \"a brief "
+            f"description of everything\") rather than one specific metric. In this case, compute exactly "
+            f"these metrics together in a single query: {COMPREHENSIVE_DEFAULT_METRICS}. Do not ask which "
+            f"one they want — return all of them."
         )
 
     prompt = f"""You are a SQL expert. Convert the user's natural language question into a single valid SQLite SELECT query.
@@ -37,7 +51,7 @@ Rules:
 - If the question uses a relative time reference like "this year", "current year", "today", "latest", or "recent", do NOT ask for clarification on the year — instead use the most recent year present in the order_date column of the data.
 - If the question is genuinely ambiguous in a way NOT covered above (e.g. unclear grouping/comparison basis, or unclear specific years to compare when no relative term like "this year" is used), respond with exactly: CLARIFY: <a short clarifying question> | OPTIONS: option1, option2, option3
 - Otherwise, return ONLY the raw SQL query. No explanation, no markdown, no code fences.
-- If the question cannot be answered with this schema at all, return: INVALID_QUERY{force_instruction}
+- If the question cannot be answered with this schema at all, return: INVALID_QUERY{comprehensive_instruction}{force_instruction}
 
 User question: "{question}"
 

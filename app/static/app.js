@@ -14,11 +14,10 @@ const EXAMPLE_QUESTIONS = [
   'Which ship mode produces the highest profit?',
 ];
 
-// How long (ms) to wait before switching the pending-message text from
-// "Thinking..." to "Preparing your answer...". If the real response
-// arrives before this fires, the stage never changes — no flicker.
 const LOADING_STAGE_DELAY_MS = 3000;
 let loadingStageTimer = null;
+let recognitionInstance = null;
+let micInputPending = false; // true right after a voice transcript fills the input, until submitted or overwritten by typing
 
 const appState = {
   conversations: [],
@@ -26,7 +25,9 @@ const appState = {
   activeTab: 'chat',
   readOnlyMode: false,
   isLoading: false,
-  loadingStage: 'thinking', // 'thinking' | 'preparing'
+  loadingStage: 'thinking',
+  isListening: false,
+  voiceChainActive: false, // true while the current conversation turn/chain originated from voice input
   sessionId: DEFAULT_SESSION_ID(),
   authToken: null,
   themePreference: localStorage.getItem(THEME_KEY) || 'light',
@@ -40,6 +41,7 @@ const elements = {
   chatForm: document.getElementById('chat-form'),
   chatInput: document.getElementById('chat-input'),
   chatSendButton: document.querySelector('#chat-form button[type="submit"]'),
+  micButton: document.getElementById('mic-btn'),
   statusBanner: document.getElementById('status-banner'),
   searchForm: document.getElementById('search-form'),
   searchResults: document.getElementById('search-results'),
@@ -75,12 +77,25 @@ function bindEvents() {
   document.getElementById('new-chat-btn').addEventListener('click', startNewChat);
   document.getElementById('clear-history-btn').addEventListener('click', clearHistory);
   elements.chatForm.addEventListener('submit', handleChatSubmit);
+  if (elements.micButton) {
+    elements.micButton.addEventListener('click', handleMicClick);
+  }
+  if (elements.chatInput) {
+    // A real 'input' event only fires on manual keystrokes, never when we
+    // programmatically set .value from the voice transcript — this is what
+    // lets us tell "typed" apart from "spoken" without extra bookkeeping.
+    elements.chatInput.addEventListener('input', () => {
+      micInputPending = false;
+      appState.voiceChainActive = false;
+    });
+  }
   if (elements.exampleChips) {
     elements.exampleChips.addEventListener('click', (event) => {
       const chip = event.target.closest('.chip');
       if (!chip) {
         return;
       }
+      micInputPending = false;
       elements.chatInput.value = chip.dataset.question;
       elements.chatForm.requestSubmit();
     });
@@ -116,6 +131,97 @@ function bindEvents() {
       loadConversation(item.dataset.id);
     }
   });
+}
+
+// --- Voice input ---
+function handleMicClick() {
+  const SpeechRecognitionClass = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognitionClass) {
+    showStatus('Voice input is not supported in this browser. Try Chrome.', 'error');
+    return;
+  }
+
+  if (appState.isListening) {
+    recognitionInstance?.stop();
+    return;
+  }
+
+  recognitionInstance = new SpeechRecognitionClass();
+  recognitionInstance.lang = 'en-US';
+  recognitionInstance.continuous = false;
+  recognitionInstance.interimResults = false;
+  recognitionInstance.maxAlternatives = 1;
+
+  recognitionInstance.onstart = () => {
+    appState.isListening = true;
+    elements.micButton.classList.add('listening');
+  };
+
+  recognitionInstance.onresult = (event) => {
+    const transcript = event.results[0][0].transcript;
+    elements.chatInput.value = transcript; // does NOT fire 'input' — marks this as voice-origin
+    micInputPending = true;
+    elements.chatInput.focus();
+  };
+
+  recognitionInstance.onerror = () => {
+    showStatus('Could not hear that clearly — please try again.', 'error');
+  };
+
+  recognitionInstance.onend = () => {
+    appState.isListening = false;
+    elements.micButton.classList.remove('listening');
+  };
+
+  recognitionInstance.start();
+}
+
+// --- Voice output ---
+function buildSpokenSummary(text) {
+  if (!text) return '';
+
+  let cleaned = text
+    .replace(/\|.*\|/g, ' ')
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/`/g, '')
+    .replace(/#+\s*/g, '');
+
+  const lines = cleaned.split('\n').map((l) => l.trim()).filter(Boolean);
+  const contentLines = lines.filter((l) => !/^assumption:/i.test(l) && !/^-{2,}$/.test(l));
+  if (!contentLines.length) return '';
+
+  const bulletPattern = /^(\d+[.)]|[-•])\s*/;
+  const introLines = [];
+  const listLines = [];
+  contentLines.forEach((line) => {
+    if (bulletPattern.test(line)) {
+      listLines.push(line.replace(bulletPattern, ''));
+    } else {
+      introLines.push(line);
+    }
+  });
+
+  // Speak the intro line plus, if there's a ranked/listed result, only the
+  // top entry — never the full list, and never a "check the screen" caveat.
+  let spoken = introLines.slice(0, 1).join(' ');
+  if (listLines.length) {
+    spoken += (spoken ? '. ' : '') + `Top result: ${listLines[0]}`;
+  }
+
+  return spoken || contentLines[0];
+}
+
+function speakConcise(text) {
+  if (!appState.voiceChainActive) return; // only speak for voice-originated turns
+  if (!('speechSynthesis' in window)) return;
+  const spoken = buildSpokenSummary(text);
+  if (!spoken) return;
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(spoken);
+  utterance.lang = 'en-US';
+  utterance.rate = 1;
+  window.speechSynthesis.speak(utterance);
 }
 
 function loadConversations() {
@@ -260,8 +366,8 @@ function renderChat() {
       const anomalyBanner = document.createElement('div');
       anomalyBanner.className = 'anomaly-banner';
       anomalyBanner.innerHTML = `
-      <div class="anomaly-banner-title">⚠ Insight${message.anomalies.length > 1 ? 's' : ''}</div>
-      <ul>${message.anomalies.map((a) => `<li>${escapeHtml(a.message)}</li>`).join('')}</ul>
+        <div class="anomaly-banner-title">⚠ Insight${message.anomalies.length > 1 ? 's' : ''}</div>
+        <ul>${message.anomalies.map((a) => `<li>${escapeHtml(a.message)}</li>`).join('')}</ul>
       `;
       messageEl.appendChild(anomalyBanner);
     }
@@ -322,6 +428,11 @@ async function handleChatSubmit(event) {
     return;
   }
 
+  // This top-level submission's voice-origin determines the whole chain's
+  // speaking behavior (including any clarification rounds that follow).
+  appState.voiceChainActive = micInputPending;
+  micInputPending = false;
+
   const conversation = ensureConversation();
   conversation.messages.push({ role: 'user', text: question });
   saveConversations();
@@ -348,10 +459,12 @@ async function handleChatSubmit(event) {
     conversation.title = deriveTitle(question);
     saveConversations();
     renderSidebar();
+    speakConcise(data?.answer);
   } catch (error) {
     showStatus(error.message, 'error');
     conversation.messages.push({ role: 'assistant', text: `Sorry — ${error.message}` });
     saveConversations();
+    speakConcise(error.message);
   } finally {
     setChatSubmitting(false);
   }
@@ -367,6 +480,9 @@ async function handleClarificationChoice(option) {
     return;
   }
 
+  // A chip click is neither typing nor a fresh voice input — the chain's
+  // existing voice state (set by the original voice/typed question) carries
+  // through unchanged.
   conversation.messages.push({ role: 'user', text: option });
   saveConversations();
   renderChat();
@@ -387,10 +503,12 @@ async function handleClarificationChoice(option) {
       anomalies: data?.anomalies || [],
     });
     saveConversations();
+    speakConcise(data?.answer);
   } catch (error) {
     showStatus(error.message, 'error');
     conversation.messages.push({ role: 'assistant', text: `Sorry — ${error.message}` });
     saveConversations();
+    speakConcise(error.message);
   } finally {
     setChatSubmitting(false);
   }
@@ -446,6 +564,27 @@ async function loadRecentRecords() {
     renderRecordTable(elements.recentRecords, data, ['row_id', 'product_name', 'category', 'region', 'quantity', 'sales', 'profit']);
   } catch (error) {
     elements.recentRecords.innerHTML = `<p>${escapeHtml(error.message)}</p>`;
+  }
+}
+
+async function loadCacheStats() {
+  const panel = document.getElementById('cache-stats-panel');
+  if (!panel) return;
+  try {
+    const data = await fetchJson('/admin/cache-stats', {
+      headers: { Authorization: `Bearer ${appState.authToken}` },
+    });
+    panel.innerHTML = `
+      <ul class="stats-list">
+        <li><strong>Hit rate:</strong> ${data.hit_rate_pct}%</li>
+        <li><strong>Cache hits:</strong> ${data.cache_hits} / ${data.total_lookups} lookups</li>
+        <li><strong>Estimated Gemini calls saved:</strong> ${data.estimated_calls_saved}</li>
+        <li><strong>Estimated cost saved:</strong> $${data.estimated_cost_saved_usd}</li>
+        <li><strong>Current cache size:</strong> ${data.current_cache_size} entries</li>
+      </ul>
+    `;
+  } catch (error) {
+    panel.innerHTML = `<p>${escapeHtml(error.message)}</p>`;
   }
 }
 
@@ -570,9 +709,19 @@ function renderAdmin() {
       </form>
       <div id="admin-record-list"></div>
     </section>
+    <section class="admin-section">
+      <h3>System Stats</h3>
+      <div class="view-card-head">
+        <p class="muted">Query cache performance</p>
+        <button id="refresh-cache-stats-btn" class="secondary-btn" type="button">Refresh</button>
+      </div>
+      <div id="cache-stats-panel" class="results-panel"></div>
+    </section>
   `;
   document.getElementById('add-record-form').addEventListener('submit', handleAddRecord);
   document.getElementById('admin-search-form').addEventListener('submit', handleAdminSearch);
+  document.getElementById('refresh-cache-stats-btn').addEventListener('click', loadCacheStats);
+  loadCacheStats();
 }
 
 async function handleLogin(event) {

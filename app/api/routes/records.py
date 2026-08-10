@@ -5,6 +5,7 @@ from app.db.session import SessionLocal
 from app.db.models import SalesRecord
 from app.schemas.sales_record import SalesRecordCreate, SalesRecordUpdate
 from app.core.security import verify_token
+from app.services.query_cache import invalidate_cache
 
 router = APIRouter()
 
@@ -21,6 +22,7 @@ def add_record(record: SalesRecordCreate, db: Session = Depends(get_db)):
     db.add(new_record)
     db.commit()
     db.refresh(new_record)
+    invalidate_cache()
     return new_record
 
 @router.get("/records/recent")
@@ -64,6 +66,7 @@ def edit_record(row_id: int, updates: SalesRecordUpdate, db: Session = Depends(g
     for key, value in updates.model_dump(exclude_unset=True).items():
         setattr(record, key, value)
     db.commit()
+    invalidate_cache()
     return record
 
 @router.delete("/records/{row_id}", dependencies=[Depends(verify_token)])
@@ -73,4 +76,5 @@ def delete_record(row_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Record not found")
     db.delete(record)
     db.commit()
+    invalidate_cache()
     return {"message": f"Deleted record with row_id {row_id}"}
