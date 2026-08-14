@@ -17,7 +17,7 @@ const EXAMPLE_QUESTIONS = [
 const LOADING_STAGE_DELAY_MS = 3000;
 let loadingStageTimer = null;
 let recognitionInstance = null;
-let micInputPending = false; // true right after a voice transcript fills the input, until submitted or overwritten by typing
+let micInputPending = false;
 
 const appState = {
   conversations: [],
@@ -27,7 +27,7 @@ const appState = {
   isLoading: false,
   loadingStage: 'thinking',
   isListening: false,
-  voiceChainActive: false, // true while the current conversation turn/chain originated from voice input
+  voiceChainActive: false,
   sessionId: DEFAULT_SESSION_ID(),
   authToken: null,
   themePreference: localStorage.getItem(THEME_KEY) || 'light',
@@ -35,6 +35,7 @@ const appState = {
 
 const elements = {
   conversationList: document.getElementById('conversation-list'),
+  chatContent: document.getElementById('chat-content'),
   chatThread: document.getElementById('chat-thread'),
   landingState: document.getElementById('landing-state'),
   exampleChips: document.querySelector('.example-chips'),
@@ -81,9 +82,6 @@ function bindEvents() {
     elements.micButton.addEventListener('click', handleMicClick);
   }
   if (elements.chatInput) {
-    // A real 'input' event only fires on manual keystrokes, never when we
-    // programmatically set .value from the voice transcript — this is what
-    // lets us tell "typed" apart from "spoken" without extra bookkeeping.
     elements.chatInput.addEventListener('input', () => {
       micInputPending = false;
       appState.voiceChainActive = false;
@@ -133,6 +131,12 @@ function bindEvents() {
   });
 }
 
+function scrollChatToBottom() {
+  if (elements.chatContent) {
+    elements.chatContent.scrollTop = elements.chatContent.scrollHeight;
+  }
+}
+
 // --- Voice input ---
 function handleMicClick() {
   const SpeechRecognitionClass = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -159,7 +163,7 @@ function handleMicClick() {
 
   recognitionInstance.onresult = (event) => {
     const transcript = event.results[0][0].transcript;
-    elements.chatInput.value = transcript; // does NOT fire 'input' — marks this as voice-origin
+    elements.chatInput.value = transcript;
     micInputPending = true;
     elements.chatInput.focus();
   };
@@ -202,8 +206,6 @@ function buildSpokenSummary(text) {
     }
   });
 
-  // Speak the intro line plus, if there's a ranked/listed result, only the
-  // top entry — never the full list, and never a "check the screen" caveat.
   let spoken = introLines.slice(0, 1).join(' ');
   if (listLines.length) {
     spoken += (spoken ? '. ' : '') + `Top result: ${listLines[0]}`;
@@ -213,7 +215,7 @@ function buildSpokenSummary(text) {
 }
 
 function speakConcise(text) {
-  if (!appState.voiceChainActive) return; // only speak for voice-originated turns
+  if (!appState.voiceChainActive) return;
   if (!('speechSynthesis' in window)) return;
   const spoken = buildSpokenSummary(text);
   if (!spoken) return;
@@ -315,6 +317,7 @@ function setChatSubmitting(isSubmitting) {
       appState.loadingStage = 'preparing';
       loadingStageTimer = null;
       renderChat();
+      scrollChatToBottom();
     }, LOADING_STAGE_DELAY_MS);
   } else {
     appState.loadingStage = 'thinking';
@@ -328,6 +331,7 @@ function setChatSubmitting(isSubmitting) {
     elements.chatSendButton.textContent = isSubmitting ? 'Sending...' : 'Send';
   }
   renderChat();
+  scrollChatToBottom();
 }
 
 function renderChat() {
@@ -346,6 +350,15 @@ function renderChat() {
   messages.forEach((message, index) => {
     const messageEl = document.createElement('div');
     messageEl.className = `message ${message.role}`;
+
+    // Chart renders BEFORE the text (issue #2 — visuals first, easier to read).
+    if (message.chart) {
+      const img = document.createElement('img');
+      img.src = `data:image/png;base64,${message.chart}`;
+      img.alt = 'Generated chart';
+      messageEl.appendChild(img);
+    }
+
     const text = document.createElement('div');
     text.className = 'message-text';
     if (message.role === 'assistant') {
@@ -354,13 +367,6 @@ function renderChat() {
       text.textContent = message.text;
     }
     messageEl.appendChild(text);
-
-    if (message.chart) {
-      const img = document.createElement('img');
-      img.src = `data:image/png;base64,${message.chart}`;
-      img.alt = 'Generated chart';
-      messageEl.appendChild(img);
-    }
 
     if (message.anomalies?.length) {
       const anomalyBanner = document.createElement('div');
@@ -428,8 +434,6 @@ async function handleChatSubmit(event) {
     return;
   }
 
-  // This top-level submission's voice-origin determines the whole chain's
-  // speaking behavior (including any clarification rounds that follow).
   appState.voiceChainActive = micInputPending;
   micInputPending = false;
 
@@ -480,12 +484,10 @@ async function handleClarificationChoice(option) {
     return;
   }
 
-  // A chip click is neither typing nor a fresh voice input — the chain's
-  // existing voice state (set by the original voice/typed question) carries
-  // through unchanged.
   conversation.messages.push({ role: 'user', text: option });
   saveConversations();
   renderChat();
+  scrollChatToBottom();
   setChatSubmitting(true);
   try {
     const data = await fetchJson('/chat/query', {
@@ -564,27 +566,6 @@ async function loadRecentRecords() {
     renderRecordTable(elements.recentRecords, data, ['row_id', 'product_name', 'category', 'region', 'quantity', 'sales', 'profit']);
   } catch (error) {
     elements.recentRecords.innerHTML = `<p>${escapeHtml(error.message)}</p>`;
-  }
-}
-
-async function loadCacheStats() {
-  const panel = document.getElementById('cache-stats-panel');
-  if (!panel) return;
-  try {
-    const data = await fetchJson('/admin/cache-stats', {
-      headers: { Authorization: `Bearer ${appState.authToken}` },
-    });
-    panel.innerHTML = `
-      <ul class="stats-list">
-        <li><strong>Hit rate:</strong> ${data.hit_rate_pct}%</li>
-        <li><strong>Cache hits:</strong> ${data.cache_hits} / ${data.total_lookups} lookups</li>
-        <li><strong>Estimated Gemini calls saved:</strong> ${data.estimated_calls_saved}</li>
-        <li><strong>Estimated cost saved:</strong> $${data.estimated_cost_saved_usd}</li>
-        <li><strong>Current cache size:</strong> ${data.current_cache_size} entries</li>
-      </ul>
-    `;
-  } catch (error) {
-    panel.innerHTML = `<p>${escapeHtml(error.message)}</p>`;
   }
 }
 
@@ -722,6 +703,27 @@ function renderAdmin() {
   document.getElementById('admin-search-form').addEventListener('submit', handleAdminSearch);
   document.getElementById('refresh-cache-stats-btn').addEventListener('click', loadCacheStats);
   loadCacheStats();
+}
+
+async function loadCacheStats() {
+  const panel = document.getElementById('cache-stats-panel');
+  if (!panel) return;
+  try {
+    const data = await fetchJson('/admin/cache-stats', {
+      headers: { Authorization: `Bearer ${appState.authToken}` },
+    });
+    panel.innerHTML = `
+      <ul class="stats-list">
+        <li><strong>Hit rate:</strong> ${data.hit_rate_pct}%</li>
+        <li><strong>Cache hits:</strong> ${data.cache_hits} / ${data.total_lookups} lookups</li>
+        <li><strong>Estimated Gemini calls saved:</strong> ${data.estimated_calls_saved}</li>
+        <li><strong>Estimated cost saved:</strong> $${data.estimated_cost_saved_usd}</li>
+        <li><strong>Current cache size:</strong> ${data.current_cache_size} entries</li>
+      </ul>
+    `;
+  } catch (error) {
+    panel.innerHTML = `<p>${escapeHtml(error.message)}</p>`;
+  }
 }
 
 async function handleLogin(event) {
@@ -1039,6 +1041,7 @@ function loadConversation(conversationId) {
   renderViews();
   renderSidebar();
   renderChat();
+  scrollChatToBottom();
   showStatus('Loaded conversation history.', 'success');
 }
 

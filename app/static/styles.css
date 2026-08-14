@@ -320,6 +320,35 @@ textarea {
   font-weight: 700;
 }
 
+.message-text table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  margin: 10px 0;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.message-text th {
+  background: var(--surface-strong);
+  color: var(--text);
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 10px 14px;
+  text-align: left;
+}
+
+.message-text td {
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+}
+
+.message-text tr:nth-child(even) td {
+  background: rgba(185, 123, 97, 0.06);
+}
+
 .message-actions {
   margin-top: 10px;
   display: flex;

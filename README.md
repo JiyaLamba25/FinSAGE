@@ -30,6 +30,12 @@ A hybrid rule-based + LLM detector flags vague questions ("what's our best categ
 ### Explainability
 Every answer has a "How?" button that reveals the exact SQL query that was run and the row count behind it — nothing is a black box.
 
+### Automatic Visualization
+Charts are generated proactively — not only when the user explicitly asks for one. Whenever a result has enough rows and a numeric value to plot, a chart is rendered automatically (above the text answer, since visuals read faster than a list), with the chart type (bar/line/pie) chosen based on the data's shape (e.g. a line chart for a time trend).
+
+### Consistent Answer Formatting
+Multi-row answers are rendered as Markdown tables (not plain lists) for easier scanning, and all currency values are consistently shown in $ — the LLM's prompt explicitly locks this rather than leaving it to guess.
+
 ### Semantic Metric Layer
 Business KPI formulas (profit margin, discount rate, average order value, sales growth rate) are locked in a central registry and injected into the LLM's prompt, so the same metric is always calculated the same way — not re-guessed on every question.
 
@@ -49,7 +55,7 @@ Users can ask prospective business questions and get a modeled answer, entirely 
 - **Break-even analysis** — *"What's our break-even discount point?"* solves algebraically for the discount rate at which profit hits zero
 - **Sensitivity sweep** — if no percentage is given, a table of outcomes across a default range (5%/10%/15%/20%) is shown instead of asking for more detail
 
-Every simulated answer states its modeling assumptions explicitly.
+Every scenario is baselined against the **most recent year** in the dataset (not an all-time total) — this keeps projections realistic and consistent with what a normal "what's our current profit" query reports — and includes a bar chart comparing baseline vs. simulated profit. Every simulated answer states its modeling assumptions explicitly.
 
 ### Agentic Self-Correction Loop
 If generated SQL fails validation or execution, the exact error is fed back to the LLM (up to 2 retries) to self-correct — instead of showing the user a raw database error.
@@ -175,7 +181,7 @@ app/
 
 ## Known Limitations & Assumptions
 
-- **What-If simulations** model overall business totals only — no per-category/region scenario support yet.
+- **What-If simulations** model overall business totals for the most recent year in the dataset only — no per-category/region scenario support yet.
 - **Price elasticity** uses a single constant value (-1.5) across the whole business; real elasticity varies by product/segment. An optimistic/pessimistic range is shown to communicate this uncertainty.
 - **Discount scenarios** assume sales volume is unaffected by discount changes — only the profit-margin effect is modeled.
 - **Query cache** is exact-text match, not semantic — differently-worded repeats of the same question won't hit the cache.

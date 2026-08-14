@@ -13,6 +13,12 @@ keyword (case-insensitive) rather than requiring an exact "profit"
 key. The matched column name is resolved once per result set (from
 the first row) and reused for every row, since all rows share the
 same columns.
+
+Row labels only exclude the SPECIFIC column being reported for that
+anomaly — not every metric-matched column — so a column like
+"discount_rate" (which matches the "discount" keyword) can still be
+used as the label when it's actually the grouping dimension, not the
+value being flagged.
 """
 
 import statistics
@@ -32,7 +38,6 @@ def _is_numeric(value) -> bool:
 
 
 def _match_column_name(sample_row: dict, keyword: str) -> Optional[str]:
-    """Find the first column whose name contains `keyword`, case-insensitive."""
     for key in sample_row.keys():
         if keyword in key.lower():
             return key
@@ -40,29 +45,35 @@ def _match_column_name(sample_row: dict, keyword: str) -> Optional[str]:
 
 
 def _resolve_columns(results: list[dict]) -> dict:
-    """Resolve each metric keyword to the actual column name present in this result set (or None)."""
     if not results:
         return {}
     sample_row = results[0]
     return {keyword: _match_column_name(sample_row, keyword) for keyword in METRIC_KEYWORDS}
 
 
-def _row_label(row: dict, resolved_columns: dict) -> str:
-    """Pick a human-readable label for a row: first string column that isn't a matched metric column."""
-    metric_col_names = {col for col in resolved_columns.values() if col}
+def _row_label(row: dict, exclude_col: str) -> str:
+    """
+    Pick a human-readable label for a row, excluding only the specific
+    column whose value is being reported (e.g. "profit"). Prefers a
+    string column; falls back to formatting any other numeric column
+    (e.g. "discount_rate: 0.30") rather than a generic "This row".
+    """
     for key, value in row.items():
-        if key not in metric_col_names and isinstance(value, str):
+        if key != exclude_col and isinstance(value, str):
             return value
+
+    for key, value in row.items():
+        if key != exclude_col and _is_numeric(value):
+            return f"{key}: {float(value):,.2f}"
+
     return "This row"
 
 
 def _row_key(row: dict) -> tuple:
-    """Stable identity for a row so we can dedupe multiple flags on the same row."""
     return tuple(sorted(row.items()))
 
 
 def _detect_negative_profit(results: list[dict], resolved_columns: dict, flagged: set) -> list[dict]:
-    """Hard rule: any row with negative profit is always worth flagging, regardless of z-score."""
     anomalies = []
     profit_col = resolved_columns.get("profit")
     if not profit_col:
@@ -78,13 +89,12 @@ def _detect_negative_profit(results: list[dict], resolved_columns: dict, flagged
             anomalies.append({
                 "type": "negative_profit",
                 "column": profit_col,
-                "message": f"{_row_label(row, resolved_columns)} is running at a loss ({float(profit):,.2f} profit).",
+                "message": f"{_row_label(row, profit_col)} is running at a loss ({float(profit):,.2f} profit).",
             })
     return anomalies
 
 
 def _detect_profit_leak(results: list[dict], resolved_columns: dict, flagged: set) -> list[dict]:
-    """Business rule: high discount combined with non-positive profit — a possible profit leak."""
     anomalies = []
     discount_col = resolved_columns.get("discount")
     profit_col = resolved_columns.get("profit")
@@ -104,7 +114,7 @@ def _detect_profit_leak(results: list[dict], resolved_columns: dict, flagged: se
                 anomalies.append({
                     "type": "profit_leak",
                     "column": profit_col,
-                    "message": f"{_row_label(row, resolved_columns)} shows a possible profit leak: "
+                    "message": f"{_row_label(row, profit_col)} shows a possible profit leak: "
                                f"{discount_f:.0%} discount with {'a loss' if profit_f < 0 else 'zero profit'} "
                                f"({profit_f:,.2f}).",
                 })
@@ -147,7 +157,7 @@ def _detect_statistical_outliers(results: list[dict], resolved_columns: dict, fl
                 anomalies.append({
                     "type": "statistical_outlier",
                     "column": column,
-                    "message": f"{_row_label(row, resolved_columns)} has {direction} {keyword} ({value_f:,.2f}, "
+                    "message": f"{_row_label(row, column)} has {direction} {keyword} ({value_f:,.2f}, "
                                f"average is {mean:,.2f}).",
                 })
 
@@ -155,7 +165,6 @@ def _detect_statistical_outliers(results: list[dict], resolved_columns: dict, fl
 
 
 def detect_anomalies(results: Optional[list[dict]]) -> list[dict]:
-    """Return up to MAX_ANOMALIES_RETURNED flagged anomalies for the given result set."""
     if not results:
         return []
 

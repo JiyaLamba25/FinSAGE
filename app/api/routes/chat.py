@@ -92,6 +92,8 @@ def build_contextual_question(req: QuestionRequest):
 @router.post("/chat/query")
 def chat_query(req: QuestionRequest):
 
+
+     
     # --- What-If Counterfactual Simulation (deterministic, bypasses LLM entirely) ---
     whatif_result = parse_whatif_question(req.question)
     if whatif_result:
@@ -147,10 +149,15 @@ def chat_query(req: QuestionRequest):
                 f"({'+' if sim['profit_change'] >= 0 else ''}{sim['profit_change']:,.2f})\n\n"
                 f"*Assumption: {sim['assumption']}*"
             )
+            chart_data = [
+                {"scenario": "Baseline", "profit": sim["baseline_profit"]},
+                {"scenario": "Simulated", "profit": sim["simulated_profit"]},
+            ]
+            chart_base64 = generate_chart(chart_data, "bar")
             anomalies = detect_anomalies([{"scenario": "Simulated (combined)", "profit": sim["simulated_profit"]}])
             return {
                 "question": req.question, "generated_sql": None, "results": None,
-                "answer": answer, "options": [], "chart": None,
+                "answer": answer, "options": [], "chart": chart_base64,
                 "needs_clarification": False, "anomalies": anomalies
             }
 
@@ -165,6 +172,8 @@ def chat_query(req: QuestionRequest):
 
         if sc["percent"] is None:
             sweep = run_sensitivity_sweep(sc["type"], sc["direction"])
+            baseline_for_display = get_baseline()
+            baseline_profit_display = baseline_for_display["profit"]
             label = "Discount" if sc["type"] == "discount" else "Price"
             table_rows = "\n".join(
                 f"| {row['percent']:.0f}% | ${row['simulated_profit']:,.2f} | "
@@ -173,18 +182,23 @@ def chat_query(req: QuestionRequest):
             )
             answer = (
                 f"No specific percentage given, so here's a sensitivity sweep for "
-                f"**{sc['direction']} {label.lower()}** across a default range:\n\n"
+                f"**{sc['direction']} {label.lower()}** across a default range.\n\n"
+                f"Current (baseline) profit: **${baseline_profit_display:,.2f}**\n\n"
                 f"| {label} Change | Simulated Profit | Profit Change |\n"
                 f"|---|---|---|\n"
                 f"{table_rows}\n\n"
                 f"*Ask with a specific percentage (e.g. \"by 10%\") for a single detailed scenario instead.*"
             )
+            chart_data = [{"change": "Baseline", "profit": baseline_profit_display}] + [
+                {"change": f"{row['percent']:.0f}%", "profit": row["simulated_profit"]} for row in sweep
+            ]
+            chart_base64 = generate_chart(chart_data, "bar")
             worst_row = min(sweep, key=lambda r: r["simulated_profit"])
             anomalies = detect_anomalies([{"scenario": f"Sensitivity worst-case ({worst_row['percent']:.0f}%)",
                                             "profit": worst_row["simulated_profit"]}])
             return {
                 "question": req.question, "generated_sql": None, "results": None,
-                "answer": answer, "options": [], "chart": None,
+                "answer": answer, "options": [], "chart": chart_base64,
                 "needs_clarification": False, "anomalies": anomalies
             }
 
@@ -211,10 +225,15 @@ def chat_query(req: QuestionRequest):
                 f"*Assumption: {sim['assumption']}*"
             )
 
+        chart_data = [
+            {"scenario": "Baseline", "profit": sim["baseline_profit"]},
+            {"scenario": "Simulated", "profit": sim["simulated_profit"]},
+        ]
+        chart_base64 = generate_chart(chart_data, "bar")
         anomalies = detect_anomalies([{"scenario": "Simulated", "profit": sim["simulated_profit"]}])
         return {
             "question": req.question, "generated_sql": None, "results": None,
-            "answer": answer, "options": [], "chart": None,
+            "answer": answer, "options": [], "chart": chart_base64,
             "needs_clarification": False, "anomalies": anomalies
         }
     # --- end What-If block ---
@@ -351,7 +370,7 @@ def chat_query(req: QuestionRequest):
         }
 
     chart_base64 = None
-    if wants_visualization(effective_question):
+    if wants_visualization(effective_question, results):
         chart_type = detect_chart_type(effective_question, results)
         chart_base64 = generate_chart(results, chart_type)
 

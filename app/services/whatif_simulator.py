@@ -2,6 +2,13 @@
 Executive "What-If" Counterfactual Simulation Engine (V1 — overall
 business totals only; no dimension/category filtering yet).
 
+Baseline is scoped to the MOST RECENT YEAR in the dataset (not an
+all-time/all-years total) — this keeps "what if" projections
+business-realistic (they model change from the *current* state of
+the business, not a blended average across old and new years), and
+keeps the numbers consistent with what a normal "what is our current
+profit" query would report.
+
 Supports:
   - Single scenario (discount OR price change by a given percent)
   - Sensitivity sweep (no percent given -> profit impact across a
@@ -42,7 +49,12 @@ SELECT
     SUM(quantity) AS total_quantity,
     AVG(discount) AS avg_discount
 FROM sales_records
+WHERE EXTRACT(YEAR FROM order_date) = (
+    SELECT MAX(EXTRACT(YEAR FROM order_date)) FROM sales_records
+)
 """
+
+BASELINE_SCOPE_NOTE = "Baseline uses the most recent year of data in the dataset, not an all-time total."
 
 
 def get_baseline() -> dict:
@@ -69,7 +81,8 @@ def simulate_discount_scenario(baseline: dict, direction: str, percent: float) -
         "scenario": f"{direction} average discount by {percent:.0f}%",
         "assumption": (
             "Assumes sales volume stays the same and every percentage point of discount "
-            "change flows straight through to profit. Demand response to discounting is not modeled."
+            "change flows straight through to profit. Demand response to discounting is not modeled. "
+            f"{BASELINE_SCOPE_NOTE}"
         ),
         "baseline_discount_pct": baseline["discount"] * 100,
         "simulated_discount_pct": new_discount * 100,
@@ -105,7 +118,7 @@ def simulate_price_scenario(baseline: dict, direction: str, percent: float,
             f"Central estimate uses a price elasticity of demand of {PRICE_ELASTICITY_OF_DEMAND} "
             f"(a 1% price change shifts quantity sold by {PRICE_ELASTICITY_OF_DEMAND}%), and "
             "assumes cost per unit stays constant. Real elasticity varies by product and "
-            "segment — this model uses one constant value across the whole business."
+            f"segment — this model uses one constant value across the whole business. {BASELINE_SCOPE_NOTE}"
         ),
         "baseline_sales": baseline["sales"],
         "simulated_sales": simulated_sales,
@@ -170,7 +183,7 @@ def run_combined_scenario(discount_direction: str, discount_percent: float,
         "assumption": (
             "Combined scenario: the discount change is applied first (profit-only effect, "
             "volume unchanged), then the price change (with its elasticity-driven demand effect) "
-            "is applied on top of that adjusted baseline."
+            f"is applied on top of that adjusted baseline. {BASELINE_SCOPE_NOTE}"
         ),
         "baseline_sales": baseline["sales"],
         "simulated_sales": step2["simulated_sales"],
@@ -200,6 +213,6 @@ def compute_breakeven_discount() -> dict:
         "assumption": (
             "Uses the same discount model as the discount scenario (volume unchanged, "
             "discount flows straight through to profit) to solve for the discount rate "
-            "at which total profit would reach exactly zero."
+            f"at which total profit would reach exactly zero. {BASELINE_SCOPE_NOTE}"
         ),
     }
